@@ -1,0 +1,101 @@
+package com.example.data.local
+
+import androidx.room.Entity
+import androidx.room.PrimaryKey
+import com.example.domain.model.ExperimentRecord
+
+@Entity(tableName = "experiments")
+data class ExperimentEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val timestampMillis: Long,
+    val endTimestampMillis: Long,
+    val deviceIp: String,
+    val deviceIdentifier: String,
+    val deviceModel: String,
+    val boardVersion: String,
+    val firmwareVersion: String,
+    val frequencyMhz: Int,
+    val voltageMv: Int,
+    val avgHashrateThs: Double,
+    val minHashrateThs: Double,
+    val maxHashrateThs: Double,
+    val avgPowerWatts: Double,
+    val efficiencyJth: Double,
+    val avgAsicTempC: Double?,
+    val avgVrTempC: Double?,
+    val avgAsicErrorPct: Double?,
+    val acceptedShares: Long,
+    val rejectedShares: Long,
+    val staleShares: Long?,
+    val sampleCount: Int,
+    val disconnectCount: Int,
+    val isStable: Boolean,
+    val stabilityScore: Double,
+    val stabilityNotes: String,
+    val durationSeconds: Long,
+    val isLastKnownStable: Boolean
+) {
+    fun toDomain(): ExperimentRecord = ExperimentRecord(
+        id = id,
+        timestampMillis = timestampMillis,
+        endTimestampMillis = endTimestampMillis,
+        deviceIp = deviceIp,
+        deviceIdentifier = deviceIdentifier,
+        deviceModel = deviceModel,
+        boardVersion = boardVersion,
+        firmwareVersion = firmwareVersion,
+        frequencyMhz = frequencyMhz,
+        voltageMv = voltageMv,
+        avgHashrateThs = avgHashrateThs,
+        minHashrateThs = minHashrateThs,
+        maxHashrateThs = maxHashrateThs,
+        avgPowerWatts = avgPowerWatts,
+        efficiencyJth = efficiencyJth,
+        avgAsicTempC = avgAsicTempC,
+        avgVrTempC = avgVrTempC,
+        avgAsicErrorPct = avgAsicErrorPct,
+        acceptedShares = acceptedShares,
+        rejectedShares = rejectedShares,
+        staleShares = staleShares,
+        sampleCount = sampleCount,
+        disconnectCount = disconnectCount,
+        isStable = isStable,
+        stabilityScore = stabilityScore,
+        stabilityNotes = stabilityNotes,
+        durationSeconds = durationSeconds,
+        isLastKnownStable = isLastKnownStable
+    )
+
+    companion object {
+        fun fromDomain(record: ExperimentRecord): ExperimentEntity = ExperimentEntity(
+            id = record.id,
+            timestampMillis = record.timestampMillis,
+            endTimestampMillis = record.endTimestampMillis,
+            deviceIp = record.deviceIp,
+            deviceIdentifier = record.deviceIdentifier,
+            deviceModel = record.deviceModel,
+            boardVersion = record.boardVersion,
+            firmwareVersion = record.firmwareVersion,
+            frequencyMhz = record.frequencyMhz,
+            voltageMv = record.voltageMv,
+            avgHashrateThs = record.avgHashrateThs,
+            minHashrateThs = record.minHashrateThs,
+            maxHashrateThs = record.maxHashrateThs,
+            avgPowerWatts = record.avgPowerWatts,
+            efficiencyJth = record.efficiencyJth,
+            avgAsicTempC = record.avgAsicTempC,
+            avgVrTempC = record.avgVrTempC,
+            avgAsicErrorPct = record.avgAsicErrorPct,
+            acceptedShares = record.acceptedShares,
+            rejectedShares = record.rejectedShares,
+            staleShares = record.staleShares,
+            sampleCount = record.sampleCount,
+            disconnectCount = record.disconnectCount,
+            isStable = record.isStable,
+            stabilityScore = record.stabilityScore,
+            stabilityNotes = record.stabilityNotes,
+            durationSeconds = record.durationSeconds,
+            isLastKnownStable = record.isLastKnownStable
+        )
+    }
+}

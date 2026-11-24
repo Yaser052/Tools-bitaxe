@@ -1,0 +1,6 @@
+{
+  "name": "Bitaxe AI",
+  "description": "Smart mining optimization and hardware telemetry analyzer for Bitaxe Gamma 1370 (BM1370) running ESP-Miner / AxeOS.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
