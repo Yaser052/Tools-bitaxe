@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -57,14 +58,17 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.example.domain.model.ConnectionState
 import com.example.ui.i18n.AppStrings
+import com.example.ui.screens.AiAutoOptimizationScreen
 import com.example.ui.screens.AnalyzerScreen
 import com.example.ui.screens.ConnectionScreen
+import com.example.ui.screens.ControlCenterScreen
 import com.example.ui.screens.DashboardScreen
 import com.example.ui.screens.DeviceInfoScreen
 import com.example.ui.screens.EfficiencyMonitorScreen
 import com.example.ui.screens.FirmwareInfoScreen
 import com.example.ui.screens.FreqVoltMatrixScreen
 import com.example.ui.screens.HistoryScreen
+import com.example.ui.screens.ManualControlScreen
 import com.example.ui.screens.RecommendationScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.SplashScreen
@@ -75,8 +79,11 @@ import com.example.ui.theme.ThermalRed
 
 object BitaxeRoute {
     const val SPLASH = "splash"
+    const val CONTROL_CENTER = "control_center"
     const val CONNECTION = "connection"
     const val DASHBOARD = "dashboard"
+    const val MANUAL_CONTROL = "manual_control"
+    const val AI_AUTO = "ai_auto"
     const val ANALYZER = "analyzer"
     const val RECOMMENDATIONS = "recommendations"
     const val MATRIX = "matrix"
@@ -106,10 +113,10 @@ fun BitaxeAppShell(
     val currentRoute = backStackEntry?.destination?.route ?: BitaxeRoute.SPLASH
 
     val primaryTabs = listOf(
-        PrimaryNavItem(BitaxeRoute.CONNECTION, strings.navConnect, Icons.Default.Link, "nav_connect"),
+        PrimaryNavItem(BitaxeRoute.CONTROL_CENTER, strings.navControlCenter, Icons.Default.Tune, "nav_control_center"),
         PrimaryNavItem(BitaxeRoute.DASHBOARD, strings.navDashboard, Icons.Default.Dashboard, "nav_dashboard"),
-        PrimaryNavItem(BitaxeRoute.ANALYZER, strings.navAnalyzer, Icons.Default.Science, "nav_analyzer"),
-        PrimaryNavItem(BitaxeRoute.RECOMMENDATIONS, strings.navRecommend, Icons.Default.AutoAwesome, "nav_recommend"),
+        PrimaryNavItem(BitaxeRoute.MANUAL_CONTROL, strings.navManual, Icons.Default.Tune, "nav_manual"),
+        PrimaryNavItem(BitaxeRoute.AI_AUTO, strings.navAiAuto, Icons.Default.AutoAwesome, "nav_ai_auto"),
         PrimaryNavItem(BitaxeRoute.HISTORY, strings.navHistory, Icons.Default.History, "nav_history")
     )
 
@@ -119,7 +126,7 @@ fun BitaxeAppShell(
 
     fun navigateToTab(route: String) {
         navController.navigate(route) {
-            popUpTo(BitaxeRoute.CONNECTION) { saveState = true }
+            popUpTo(BitaxeRoute.CONTROL_CENTER) { saveState = true }
             launchSingleTop = true
             restoreState = true
         }
@@ -180,8 +187,11 @@ fun BitaxeAppShell(
                                 )
                                 Text(
                                     text = when (currentRoute) {
+                                        BitaxeRoute.CONTROL_CENTER -> strings.controlCenterTitle
                                         BitaxeRoute.CONNECTION -> strings.connectionTitle
                                         BitaxeRoute.DASHBOARD -> strings.dashboardTitle
+                                        BitaxeRoute.MANUAL_CONTROL -> strings.manualControlTitle
+                                        BitaxeRoute.AI_AUTO -> strings.aiAutoTitle
                                         BitaxeRoute.ANALYZER -> strings.analyzerTitle
                                         BitaxeRoute.RECOMMENDATIONS -> strings.recommendScreenTitle
                                         BitaxeRoute.MATRIX -> strings.matrixTitle
@@ -198,16 +208,16 @@ fun BitaxeAppShell(
                         },
                         actions = {
                             IconButton(
+                                onClick = { navigateToTool(BitaxeRoute.CONNECTION) },
+                                modifier = Modifier.testTag("topbar_connect_button")
+                            ) {
+                                Icon(Icons.Default.Link, contentDescription = strings.navConnect, tint = statusColor)
+                            }
+                            IconButton(
                                 onClick = { navigateToTool(BitaxeRoute.MATRIX) },
                                 modifier = Modifier.testTag("topbar_matrix_button")
                             ) {
                                 Icon(Icons.Default.GridView, contentDescription = strings.navMatrix, tint = ElectricCyan)
-                            }
-                            IconButton(
-                                onClick = { navigateToTool(BitaxeRoute.SETTINGS) },
-                                modifier = Modifier.testTag("topbar_settings_button")
-                            ) {
-                                Icon(Icons.Default.Settings, contentDescription = strings.navSettings, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                             Box {
                                 IconButton(
@@ -220,6 +230,21 @@ fun BitaxeAppShell(
                                     expanded = menuExpanded,
                                     onDismissRequest = { menuExpanded = false }
                                 ) {
+                                    DropdownMenuItem(
+                                        text = { Text(strings.navConnect) },
+                                        leadingIcon = { Icon(Icons.Default.Link, contentDescription = null) },
+                                        onClick = { menuExpanded = false; navigateToTool(BitaxeRoute.CONNECTION) }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text(strings.navAnalyzer) },
+                                        leadingIcon = { Icon(Icons.Default.Science, contentDescription = null) },
+                                        onClick = { menuExpanded = false; navigateToTool(BitaxeRoute.ANALYZER) }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text(strings.navRecommend) },
+                                        leadingIcon = { Icon(Icons.Default.AutoAwesome, contentDescription = null) },
+                                        onClick = { menuExpanded = false; navigateToTool(BitaxeRoute.RECOMMENDATIONS) }
+                                    )
                                     DropdownMenuItem(
                                         text = { Text(strings.navMatrix) },
                                         leadingIcon = { Icon(Icons.Default.GridView, contentDescription = null) },
@@ -304,13 +329,23 @@ fun BitaxeAppShell(
                         SplashScreen(
                             strings = strings,
                             onContinue = {
-                                navController.navigate(BitaxeRoute.CONNECTION) {
+                                navController.navigate(BitaxeRoute.CONTROL_CENTER) {
                                     popUpTo(navController.graph.findStartDestination().id) {
                                         inclusive = true
                                     }
                                     launchSingleTop = true
                                 }
                             }
+                        )
+                    }
+                    composable(BitaxeRoute.CONTROL_CENTER) {
+                        ControlCenterScreen(
+                            state = state,
+                            strings = strings,
+                            onOpenManualMode = { navigateToTab(BitaxeRoute.MANUAL_CONTROL) },
+                            onOpenAiAutoMode = { navigateToTab(BitaxeRoute.AI_AUTO) },
+                            onOpenConnect = { navigateToTool(BitaxeRoute.CONNECTION) },
+                            onOpenDashboard = { navigateToTab(BitaxeRoute.DASHBOARD) }
                         )
                     }
                     composable(BitaxeRoute.CONNECTION) {
@@ -329,9 +364,42 @@ fun BitaxeAppShell(
                             state = state,
                             strings = strings,
                             onManualRefresh = viewModel::manualRefresh,
-                            onNavigateToConnect = { navigateToTab(BitaxeRoute.CONNECTION) },
+                            onNavigateToConnect = { navigateToTool(BitaxeRoute.CONNECTION) },
                             onNavigateToMatrix = { navigateToTool(BitaxeRoute.MATRIX) },
                             onNavigateToEfficiency = { navigateToTool(BitaxeRoute.EFFICIENCY) }
+                        )
+                    }
+                    composable(BitaxeRoute.MANUAL_CONTROL) {
+                        ManualControlScreen(
+                            state = state,
+                            strings = strings,
+                            onFrequencyTextChange = viewModel::updateManualFrequencyText,
+                            onVoltageTextChange = viewModel::updateManualVoltageText,
+                            onStepFrequency = viewModel::stepManualFrequency,
+                            onStepVoltage = viewModel::stepManualVoltage,
+                            onReadCurrent = viewModel::readCurrentSettingsIntoManual,
+                            onRequestApply = viewModel::requestApplyManualSettings,
+                            onVerify = viewModel::verifyManualSettingsOnDevice,
+                            onRequestRestoreStable = viewModel::requestRestoreLastStable,
+                            onConfirmApply = viewModel::confirmApplyManualSettings,
+                            onConfirmRestore = viewModel::confirmRestoreLastStable,
+                            onDismissDialogs = viewModel::dismissManualDialogs
+                        )
+                    }
+                    composable(BitaxeRoute.AI_AUTO) {
+                        AiAutoOptimizationScreen(
+                            state = state,
+                            strings = strings,
+                            onUpdateRange = viewModel::updateExplorationRange,
+                            onStepRange = viewModel::stepRangeValue,
+                            onSelectProfile = viewModel::selectProfile,
+                            onRequestStart = viewModel::requestStartAiAutoOptimization,
+                            onConfirmStart = viewModel::confirmAndStartAiAutoOptimization,
+                            onDismissAuth = viewModel::dismissAiAuthDialog,
+                            onPause = viewModel::pauseAiAutoOptimization,
+                            onResume = viewModel::resumeAiAutoOptimization,
+                            onStop = viewModel::stopAiAutoOptimization,
+                            onRestoreLastStable = viewModel::restoreLastStableFromAiAuto
                         )
                     }
                     composable(BitaxeRoute.ANALYZER) {
@@ -340,7 +408,7 @@ fun BitaxeAppShell(
                             strings = strings,
                             onStartRecording = viewModel::startRecordingSession,
                             onStopAndSave = viewModel::stopAndSaveRecordingSession,
-                            onNavigateToConnect = { navigateToTab(BitaxeRoute.CONNECTION) },
+                            onNavigateToConnect = { navigateToTool(BitaxeRoute.CONNECTION) },
                             onNavigateToMatrix = { navigateToTool(BitaxeRoute.MATRIX) }
                         )
                     }
@@ -349,7 +417,7 @@ fun BitaxeAppShell(
                             state = state,
                             strings = strings,
                             onSelectProfile = viewModel::selectProfile,
-                            onNavigateToAnalyzer = { navigateToTab(BitaxeRoute.ANALYZER) }
+                            onNavigateToAnalyzer = { navigateToTool(BitaxeRoute.ANALYZER) }
                         )
                     }
                     composable(BitaxeRoute.MATRIX) {

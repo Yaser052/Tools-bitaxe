@@ -33,7 +33,12 @@ data class ExperimentEntity(
     val stabilityScore: Double,
     val stabilityNotes: String,
     val durationSeconds: Long,
-    val isLastKnownStable: Boolean
+    val isLastKnownStable: Boolean,
+    val operationMode: String = "BASELINE",
+    val experimentResult: String = "STABLE_PASS",
+    val rollbackTriggered: Boolean = false,
+    val rollbackTarget: String? = null,
+    val rollbackConfirmed: Boolean = false
 ) {
     fun toDomain(): ExperimentRecord = ExperimentRecord(
         id = id,
@@ -63,7 +68,12 @@ data class ExperimentEntity(
         stabilityScore = stabilityScore,
         stabilityNotes = stabilityNotes,
         durationSeconds = durationSeconds,
-        isLastKnownStable = isLastKnownStable
+        isLastKnownStable = isLastKnownStable,
+        operationMode = operationMode,
+        experimentResult = experimentResult,
+        rollbackTriggered = rollbackTriggered,
+        rollbackTarget = rollbackTarget,
+        rollbackConfirmed = rollbackConfirmed
     )
 
     companion object {
@@ -95,7 +105,12 @@ data class ExperimentEntity(
             stabilityScore = record.stabilityScore,
             stabilityNotes = record.stabilityNotes,
             durationSeconds = record.durationSeconds,
-            isLastKnownStable = record.isLastKnownStable
+            isLastKnownStable = record.isLastKnownStable,
+            operationMode = record.operationMode,
+            experimentResult = record.experimentResult,
+            rollbackTriggered = record.rollbackTriggered,
+            rollbackTarget = record.rollbackTarget,
+            rollbackConfirmed = record.rollbackConfirmed
         )
     }
 }

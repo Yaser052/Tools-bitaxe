@@ -2,11 +2,14 @@ package com.example.data.network
 
 import okhttp3.ResponseBody
 import retrofit2.Response
+import retrofit2.http.Body
 import retrofit2.http.GET
+import retrofit2.http.PATCH
 
 /**
- * Strictly READ-ONLY AxeOS / ESP-Miner API service.
- * RECOMMENDATION-ONLY MODE: No PATCH, POST, PUT, or DELETE endpoints exist in this client.
+ * Official ESP-Miner / AxeOS REST API service.
+ * Telemetry endpoints are GET; configuration changes use PATCH /api/system
+ * strictly after explicit user authorization or manual confirmation.
  */
 interface AxeOsApiService {
 
@@ -24,4 +27,7 @@ interface AxeOsApiService {
 
     @GET("api/system/logs")
     suspend fun getSystemLogs(): Response<ResponseBody>
+
+    @PATCH("api/system")
+    suspend fun updateSystemConfig(@Body request: SystemConfigPatchRequest): Response<ResponseBody>
 }

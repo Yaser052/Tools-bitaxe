@@ -184,7 +184,12 @@ data class ExperimentRecord(
     val stabilityScore: Double,
     val stabilityNotes: String,
     val durationSeconds: Long,
-    val isLastKnownStable: Boolean = false
+    val isLastKnownStable: Boolean = false,
+    val operationMode: String = "BASELINE",
+    val experimentResult: String = if (isStable) "STABLE_PASS" else "UNSTABLE",
+    val rollbackTriggered: Boolean = false,
+    val rollbackTarget: String? = null,
+    val rollbackConfirmed: Boolean = false
 )
 
 data class GridCandidate(
@@ -237,3 +242,126 @@ data class ActiveRecordingSession(
     val elapsedSeconds: Long
         get() = ((System.currentTimeMillis() - startTimestampMillis) / 1000L).coerceAtLeast(0L)
 }
+
+data class ConfigVerificationResult(
+    val verified: Boolean,
+    val httpSuccess: Boolean,
+    val httpCode: Int?,
+    val requestedFrequencyMhz: Int,
+    val requestedVoltageMv: Int,
+    val actualFrequencyMhz: Int?,
+    val actualVoltageMv: Int?,
+    val actualCoreVoltageMv: Int?,
+    val telemetryAfterApply: LiveTelemetry?,
+    val message: String
+)
+
+data class ExplorationRangeConfig(
+    val minFrequencyMhz: Int = 600,
+    val maxFrequencyMhz: Int = 670,
+    val minVoltageMv: Int = 1100,
+    val maxVoltageMv: Int = 1170,
+    val maxExperimentsBudget: Int = 8,
+    val observationSeconds: Long = 60L,
+    val stabilizationSeconds: Long = 10L
+)
+
+data class RangeValidationResult(
+    val isValid: Boolean,
+    val errors: List<String> = emptyList(),
+    val frequencyCount: Int = 0,
+    val voltageCount: Int = 0,
+    val totalCombinations: Int = 0
+)
+
+enum class ManualControlStatus {
+    IDLE,
+    VALIDATING,
+    APPLYING,
+    VERIFYING,
+    VERIFIED_SUCCESS,
+    VERIFICATION_MISMATCH,
+    REJECTED_SAFETY,
+    FAILED
+}
+
+data class ManualControlUiState(
+    val proposedFrequencyMhz: Int = 625,
+    val proposedVoltageMv: Int = 1150,
+    val frequencyText: String = "625",
+    val voltageText: String = "1150",
+    val status: ManualControlStatus = ManualControlStatus.IDLE,
+    val statusMessage: String? = null,
+    val lastVerification: ConfigVerificationResult? = null,
+    val showApplyConfirmation: Boolean = false,
+    val showRestoreConfirmation: Boolean = false
+)
+
+enum class AiAutoPhase {
+    IDLE,
+    ESTABLISHING_BASELINE,
+    SELECTING_CANDIDATE,
+    APPLYING_CONFIG,
+    STABILIZING,
+    OBSERVING,
+    PAUSED,
+    ROLLING_BACK,
+    COMPLETED,
+    SAFETY_ABORTED,
+    STOPPED
+}
+
+data class AiAutoExperimentLogItem(
+    val index: Int,
+    val frequencyMhz: Int,
+    val voltageMv: Int,
+    val result: String,
+    val avgHashrateThs: Double?,
+    val avgPowerWatts: Double?,
+    val efficiencyJth: Double?,
+    val asicTempC: Double?,
+    val errorPct: Double?,
+    val detail: String,
+    val timestampMillis: Long = System.currentTimeMillis()
+)
+
+data class AiAutoSessionState(
+    val phase: AiAutoPhase = AiAutoPhase.IDLE,
+    val isRunning: Boolean = false,
+    val isPaused: Boolean = false,
+    val currentExperimentNumber: Int = 0,
+    val totalPlannedExperiments: Int = 0,
+    val currentTargetFreqMhz: Int? = null,
+    val currentTargetVoltMv: Int? = null,
+    val baselineRecord: ExperimentRecord? = null,
+    val bestStableRecord: ExperimentRecord? = null,
+    val activeExperimentSamples: List<LiveTelemetry> = emptyList(),
+    val phaseProgress: Float = 0f,
+    val statusBanner: String? = null,
+    val rollbackNotice: String? = null,
+    val logs: List<AiAutoExperimentLogItem> = emptyList()
+)
+
+enum class SafetyViolationType {
+    OVERHEAT_ASIC,
+    OVERHEAT_VR,
+    FIRMWARE_OVERHEAT_MODE,
+    POWER_FAULT,
+    ABNORMAL_ASIC_ERRORS,
+    DEVICE_RESTART_DETECTED,
+    HASHRATE_COLLAPSE,
+    NETWORK_INTERRUPTION,
+    TELEMETRY_TIMEOUT,
+    INVALID_LIMITS
+}
+
+data class SafetyViolation(
+    val type: SafetyViolationType,
+    val message: String,
+    val critical: Boolean = true
+)
+
+data class SafetyAssessment(
+    val isSafe: Boolean,
+    val violations: List<SafetyViolation> = emptyList()
+)

@@ -70,3 +70,12 @@ data class SystemAsicDto(
     @Json(name = "absMaxFrequency") val absMaxFrequency: Int? = null,
     @Json(name = "absMaxVoltage") val absMaxVoltage: Int? = null
 )
+
+/**
+ * Real ESP-Miner / AxeOS PATCH /api/system configuration payload.
+ */
+@JsonClass(generateAdapter = true)
+data class SystemConfigPatchRequest(
+    @Json(name = "frequency") val frequency: Int,
+    @Json(name = "coreVoltage") val coreVoltage: Int
+)

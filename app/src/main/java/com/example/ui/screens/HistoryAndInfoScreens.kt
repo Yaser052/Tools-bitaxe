@@ -205,15 +205,27 @@ fun HistoryScreen(
                         }
 
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            TagBadge(exp.operationMode, ElectricCyan)
+                            TagBadge(
+                                exp.experimentResult,
+                                when {
+                                    exp.isStable || exp.experimentResult == "APPLIED_VERIFIED" || exp.experimentResult == "ROLLED_BACK" -> NeonEmerald
+                                    else -> ThermalRed
+                                }
+                            )
                             if (isBest) {
                                 TagBadge(strings.bestStableBadge, NeonEmerald)
                             }
                             if (exp.isLastKnownStable) {
                                 TagBadge(strings.lastStableBadge, ElectricCyan)
                             }
-                            TagBadge(
-                                if (exp.isStable) "STABLE (${exp.stabilityScore.toInt()})" else "UNSTABLE",
-                                if (exp.isStable) NeonEmerald else ThermalRed
+                        }
+
+                        if (exp.rollbackTriggered) {
+                            Text(
+                                text = "Rollback to ${exp.rollbackTarget ?: "?"} • ${if (exp.rollbackConfirmed) "Confirmed" else "Unconfirmed"}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = AmberCaution
                             )
                         }
 

@@ -12,6 +12,7 @@ import com.example.domain.engine.BitaxeOptimizationEngine
 import com.example.domain.engine.EfficiencyCalculator
 import com.example.domain.model.AnalysisProfile
 import com.example.domain.model.AppLanguage
+import com.example.domain.model.ConfigVerificationResult
 import com.example.domain.model.ExperimentRecord
 import com.example.domain.model.LiveTelemetry
 import com.example.domain.model.RollingAverages
@@ -40,6 +41,46 @@ class BitaxeRepository(
 
     suspend fun pollTelemetry(hostIp: String, baseUrl: String): Result<LiveTelemetry> {
         return networkClient.fetchSystemInfo(hostIp, baseUrl)
+    }
+
+    suspend fun applyAndVerifyConfig(
+        hostIp: String,
+        baseUrl: String,
+        frequencyMhz: Int,
+        voltageMv: Int
+    ): ConfigVerificationResult {
+        return networkClient.applyAndVerifySystemConfig(
+            hostIp = hostIp,
+            baseUrl = baseUrl,
+            targetFrequencyMhz = frequencyMhz,
+            targetVoltageMv = voltageMv
+        )
+    }
+
+    suspend fun verifyCurrentConfig(
+        hostIp: String,
+        baseUrl: String,
+        expectedFrequencyMhz: Int,
+        expectedVoltageMv: Int
+    ): ConfigVerificationResult {
+        val poll = networkClient.fetchSystemInfo(hostIp, baseUrl)
+        val telemetry = poll.getOrNull()
+        return if (telemetry == null) {
+            ConfigVerificationResult(
+                verified = false,
+                httpSuccess = false,
+                httpCode = null,
+                requestedFrequencyMhz = expectedFrequencyMhz,
+                requestedVoltageMv = expectedVoltageMv,
+                actualFrequencyMhz = null,
+                actualVoltageMv = null,
+                actualCoreVoltageMv = null,
+                telemetryAfterApply = null,
+                message = "Verification readback failed: ${poll.exceptionOrNull()?.message ?: "Device unreachable"}"
+            )
+        } else {
+            networkClient.verifyReadback(expectedFrequencyMhz, expectedVoltageMv, 200, telemetry)
+        }
     }
 
     fun observeWebSocket(hostIp: String): Flow<WebSocketEvent> =
@@ -102,7 +143,13 @@ class BitaxeRepository(
         voltageMv: Int,
         startTimestampMillis: Long,
         disconnectCount: Int,
-        thresholds: SafetyThresholdConfig
+        thresholds: SafetyThresholdConfig,
+        operationMode: String = "BASELINE",
+        forcedResult: String? = null,
+        forcedNotes: String? = null,
+        rollbackTriggered: Boolean = false,
+        rollbackTarget: String? = null,
+        rollbackConfirmed: Boolean = false
     ): ExperimentRecord? {
         val validHash = samples.mapNotNull { it.currentHashrateThs }.filter { it > 0.0 }
         val validPower = samples.mapNotNull { it.powerWatts }.filter { it > 0.0 }
@@ -160,21 +207,29 @@ class BitaxeRepository(
             stabilityScore = stabilityScore,
             stabilityNotes = "",
             durationSeconds = durationSec,
-            isLastKnownStable = false
+            isLastKnownStable = false,
+            operationMode = operationMode,
+            experimentResult = forcedResult ?: "UNSTABLE",
+            rollbackTriggered = rollbackTriggered,
+            rollbackTarget = rollbackTarget,
+            rollbackConfirmed = rollbackConfirmed
         )
 
         val issues = BitaxeOptimizationEngine.evaluateSafetyIssues(draft, null, thresholds)
-        val stable = issues.isEmpty() && stabilityScore >= 60.0
-        val notes = if (stable) {
+        val stable = forcedResult == null && issues.isEmpty() && stabilityScore >= 60.0
+        val notes = forcedNotes ?: if (stable) {
             "Verified stable (${samples.size} samples, ${durationSec}s, score ${stabilityScore.toInt()}/100)"
         } else {
             issues.joinToString("; ").ifEmpty { "Stability score ${stabilityScore.toInt()}/100 below 60" }
         }
 
+        val resolvedResult = forcedResult ?: if (stable) "STABLE_PASS" else "REJECTED_UNSAFE"
+
         return draft.copy(
             isStable = stable,
             stabilityNotes = notes,
-            isLastKnownStable = stable
+            isLastKnownStable = stable,
+            experimentResult = resolvedResult
         )
     }
 }

@@ -6,6 +6,7 @@ import android.net.LinkProperties
 import com.example.domain.engine.EfficiencyCalculator
 import com.example.domain.engine.NetworkValidator
 import com.example.domain.model.AsicCapabilities
+import com.example.domain.model.ConfigVerificationResult
 import com.example.domain.model.EndpointProbeResult
 import com.example.domain.model.EndpointStatus
 import com.example.domain.model.LiveTelemetry
@@ -16,9 +17,12 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -32,6 +36,7 @@ import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
 import java.net.Inet4Address
 import java.util.concurrent.TimeUnit
+import kotlin.math.abs
 
 data class DiscoveredBitaxeDevice(
     val ip: String,
@@ -65,6 +70,9 @@ class AxeOsNetworkClient(private val context: Context) {
         .build()
 
     private val infoAdapter = moshi.adapter(SystemInfoDto::class.java)
+
+    // Serializes all hardware configuration writes to guarantee zero overlapping requests
+    private val configWriteMutex = Mutex()
 
     private val okHttpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(3, TimeUnit.SECONDS)
@@ -100,6 +108,131 @@ class AxeOsNetworkClient(private val context: Context) {
                 mapSystemInfoToTelemetry(resp.body()!!, hostIp, latencyMs, "HTTP REST", false)
             }
         }
+
+    /**
+     * Serialized configuration write: sends PATCH /api/system, waits briefly for ESP-Miner
+     * to apply settings, then reads back GET /api/system/info and verifies actual values.
+     * Never reports success until the device confirms the requested frequency and coreVoltage.
+     */
+    suspend fun applyAndVerifySystemConfig(
+        hostIp: String,
+        baseUrl: String,
+        targetFrequencyMhz: Int,
+        targetVoltageMv: Int,
+        readbackDelayMs: Long = 1200L
+    ): ConfigVerificationResult = configWriteMutex.withLock {
+        withContext(Dispatchers.IO) {
+            val service = buildService(baseUrl)
+
+            val patchResult = runCatching {
+                service.updateSystemConfig(
+                    SystemConfigPatchRequest(
+                        frequency = targetFrequencyMhz,
+                        coreVoltage = targetVoltageMv
+                    )
+                )
+            }
+
+            val patchResponse = patchResult.getOrNull()
+            if (patchResult.isFailure || patchResponse == null) {
+                return@withContext ConfigVerificationResult(
+                    verified = false,
+                    httpSuccess = false,
+                    httpCode = null,
+                    requestedFrequencyMhz = targetFrequencyMhz,
+                    requestedVoltageMv = targetVoltageMv,
+                    actualFrequencyMhz = null,
+                    actualVoltageMv = null,
+                    actualCoreVoltageMv = null,
+                    telemetryAfterApply = null,
+                    message = "Device unreachable during PATCH /api/system: ${patchResult.exceptionOrNull()?.message ?: "timeout"}"
+                )
+            }
+
+            if (!patchResponse.isSuccessful) {
+                val code = patchResponse.code()
+                val errDetail = runCatching { patchResponse.errorBody()?.string() }.getOrNull()
+                return@withContext ConfigVerificationResult(
+                    verified = false,
+                    httpSuccess = false,
+                    httpCode = code,
+                    requestedFrequencyMhz = targetFrequencyMhz,
+                    requestedVoltageMv = targetVoltageMv,
+                    actualFrequencyMhz = null,
+                    actualVoltageMv = null,
+                    actualCoreVoltageMv = null,
+                    telemetryAfterApply = null,
+                    message = "PATCH /api/system rejected with HTTP $code${if (!errDetail.isNullOrBlank()) ": $errDetail" else ""}"
+                )
+            }
+
+            // Allow ESP-Miner to update PLL / Vcore regulator before readback
+            delay(readbackDelayMs)
+
+            val verifyResult = fetchSystemInfo(hostIp, baseUrl)
+            val telemetry = verifyResult.getOrNull()
+            if (telemetry == null) {
+                return@withContext ConfigVerificationResult(
+                    verified = false,
+                    httpSuccess = true,
+                    httpCode = patchResponse.code(),
+                    requestedFrequencyMhz = targetFrequencyMhz,
+                    requestedVoltageMv = targetVoltageMv,
+                    actualFrequencyMhz = null,
+                    actualVoltageMv = null,
+                    actualCoreVoltageMv = null,
+                    telemetryAfterApply = null,
+                    message = "PATCH succeeded (HTTP ${patchResponse.code()}) but readback verification failed: ${verifyResult.exceptionOrNull()?.message ?: "unreachable"}"
+                )
+            }
+
+            verifyReadback(
+                requestedFreq = targetFrequencyMhz,
+                requestedVolt = targetVoltageMv,
+                httpCode = patchResponse.code(),
+                telemetry = telemetry
+            )
+        }
+    }
+
+    /**
+     * Pure verification helper comparing requested values against device /api/system/info readback.
+     */
+    fun verifyReadback(
+        requestedFreq: Int,
+        requestedVolt: Int,
+        httpCode: Int? = 200,
+        telemetry: LiveTelemetry
+    ): ConfigVerificationResult {
+        val actualFreq = telemetry.frequencyMhz
+        val actualTargetVolt = telemetry.coreVoltageTargetMv
+        val actualMeasuredVolt = telemetry.coreVoltageActualMv
+
+        val freqMatch = actualFreq != null && actualFreq == requestedFreq
+        // ESP-Miner updates coreVoltage immediately; coreVoltageActual may read +/- 10mV ADC tolerance
+        val voltMatch = (actualTargetVolt != null && actualTargetVolt == requestedVolt) ||
+            (actualTargetVolt == null && actualMeasuredVolt != null && abs(actualMeasuredVolt - requestedVolt) <= 10)
+
+        val verified = freqMatch && voltMatch
+        val message = if (verified) {
+            "Verified on device: ${actualFreq} MHz / ${actualTargetVolt ?: actualMeasuredVolt} mV"
+        } else {
+            "Verification mismatch: requested $requestedFreq MHz / $requestedVolt mV, device reported ${actualFreq ?: "?"} MHz / ${actualTargetVolt ?: actualMeasuredVolt ?: "?"} mV"
+        }
+
+        return ConfigVerificationResult(
+            verified = verified,
+            httpSuccess = true,
+            httpCode = httpCode,
+            requestedFrequencyMhz = requestedFreq,
+            requestedVoltageMv = requestedVolt,
+            actualFrequencyMhz = actualFreq,
+            actualVoltageMv = actualTargetVolt,
+            actualCoreVoltageMv = actualMeasuredVolt,
+            telemetryAfterApply = telemetry,
+            message = message
+        )
+    }
 
     suspend fun probeAllEndpoints(hostIp: String, baseUrl: String): FullDeviceSnapshot =
         withContext(Dispatchers.IO) {
@@ -211,7 +344,15 @@ class AxeOsNetworkClient(private val context: Context) {
                 detail = if (parsedLogs.isNotEmpty()) "${parsedLogs.size} lines" else "Optional endpoint"
             )
 
-            // 6. WebSocket /api/ws/live (initial status marked NOT_PROBED until stream opens)
+            // 6. PATCH /api/system (readiness noted from info/asic availability)
+            probes += EndpointProbeResult(
+                endpoint = "PATCH /api/system",
+                protocol = "HTTP",
+                status = EndpointStatus.SUPPORTED,
+                detail = "Manual & AI Auto configuration write"
+            )
+
+            // 7. WebSocket /api/ws/live
             probes += EndpointProbeResult(
                 endpoint = "WS /api/ws/live",
                 protocol = "WebSocket",
@@ -277,9 +418,6 @@ class AxeOsNetworkClient(private val context: Context) {
         }
     }
 
-    /**
-     * Scans the device's local Wi-Fi/LAN /24 subnet in parallel batches for Bitaxe AxeOS nodes.
-     */
     suspend fun discoverLocalBitaxeDevices(): List<DiscoveredBitaxeDevice> =
         withContext(Dispatchers.IO) {
             val prefix = detectLocalIpv4SubnetPrefix() ?: "192.168.1"
@@ -347,7 +485,6 @@ class AxeOsNetworkClient(private val context: Context) {
         transport: String,
         isWs: Boolean
     ): LiveTelemetry {
-        // ESP-Miner reports hashRate in GH/s; convert strictly to TH/s (1 TH/s = 1000 GH/s).
         val currentThs = EfficiencyCalculator.hashrateGhsToThs(dto.hashRate)
         val avgThs = EfficiencyCalculator.hashrateGhsToThs(dto.hashRate10m ?: dto.hashRate1m ?: dto.hashRate)
         val expectedThs = EfficiencyCalculator.hashrateGhsToThs(dto.expectedHashrate)

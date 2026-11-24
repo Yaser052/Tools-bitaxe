@@ -4,9 +4,11 @@ import com.example.domain.model.AnalysisProfile
 import com.example.domain.model.AsicCapabilities
 import com.example.domain.model.CandidateCellStatus
 import com.example.domain.model.ExperimentRecord
+import com.example.domain.model.ExplorationRangeConfig
 import com.example.domain.model.GridCandidate
 import com.example.domain.model.LiveTelemetry
 import com.example.domain.model.OptimizationRecommendation
+import com.example.domain.model.RangeValidationResult
 import com.example.domain.model.SafetyThresholdConfig
 import kotlin.math.abs
 import kotlin.math.max
@@ -36,9 +38,151 @@ object BitaxeOptimizationEngine {
         "Insufficient measurement data to generate a reliable recommendation."
 
     /**
-     * Evaluates whether an individual recorded experiment is eligible under strict
-     * hardware, thermal, error-rate, and observation-duration safety gates.
+     * Validates user-defined exploration ranges for AI Auto Mode.
+     * Checks: min < max, exact 5-unit step alignment, global hardware bounds, and firmware capabilities.
      */
+    fun validateExplorationRange(
+        range: ExplorationRangeConfig,
+        capabilities: AsicCapabilities?
+    ): RangeValidationResult {
+        val errors = mutableListOf<String>()
+
+        if (range.minFrequencyMhz !in MIN_FREQUENCY_MHZ..MAX_FREQUENCY_MHZ) {
+            errors += "Minimum frequency (${range.minFrequencyMhz} MHz) must be within $MIN_FREQUENCY_MHZ–$MAX_FREQUENCY_MHZ MHz."
+        }
+        if (range.maxFrequencyMhz !in MIN_FREQUENCY_MHZ..MAX_FREQUENCY_MHZ) {
+            errors += "Maximum frequency (${range.maxFrequencyMhz} MHz) must be within $MIN_FREQUENCY_MHZ–$MAX_FREQUENCY_MHZ MHz."
+        }
+        if ((range.minFrequencyMhz - MIN_FREQUENCY_MHZ) % FREQUENCY_STEP_MHZ != 0) {
+            errors += "Minimum frequency (${range.minFrequencyMhz} MHz) must align with exact 5 MHz steps."
+        }
+        if ((range.maxFrequencyMhz - MIN_FREQUENCY_MHZ) % FREQUENCY_STEP_MHZ != 0) {
+            errors += "Maximum frequency (${range.maxFrequencyMhz} MHz) must align with exact 5 MHz steps."
+        }
+        if (range.minFrequencyMhz >= range.maxFrequencyMhz) {
+            errors += "Minimum frequency must be strictly less than maximum frequency."
+        }
+
+        if (range.minVoltageMv !in MIN_VOLTAGE_MV..MAX_VOLTAGE_MV) {
+            errors += "Minimum voltage (${range.minVoltageMv} mV) must be within $MIN_VOLTAGE_MV–$MAX_VOLTAGE_MV mV."
+        }
+        if (range.maxVoltageMv !in MIN_VOLTAGE_MV..MAX_VOLTAGE_MV) {
+            errors += "Maximum voltage (${range.maxVoltageMv} mV) must be within $MIN_VOLTAGE_MV–$MAX_VOLTAGE_MV mV."
+        }
+        if ((range.minVoltageMv - MIN_VOLTAGE_MV) % VOLTAGE_STEP_MV != 0) {
+            errors += "Minimum voltage (${range.minVoltageMv} mV) must align with exact 5 mV steps."
+        }
+        if ((range.maxVoltageMv - MIN_VOLTAGE_MV) % VOLTAGE_STEP_MV != 0) {
+            errors += "Maximum voltage (${range.maxVoltageMv} mV) must align with exact 5 mV steps."
+        }
+        if (range.minVoltageMv >= range.maxVoltageMv) {
+            errors += "Minimum voltage must be strictly less than maximum voltage."
+        }
+
+        capabilities?.absMaxFrequencyMhz?.let { fwMaxF ->
+            if (range.maxFrequencyMhz > fwMaxF) {
+                errors += "Max frequency (${range.maxFrequencyMhz} MHz) exceeds firmware absMaxFrequency ($fwMaxF MHz)."
+            }
+        }
+        capabilities?.absMaxVoltageMv?.let { fwMaxV ->
+            if (range.maxVoltageMv > fwMaxV) {
+                errors += "Max voltage (${range.maxVoltageMv} mV) exceeds firmware absMaxVoltage ($fwMaxV mV)."
+            }
+        }
+
+        if (range.maxExperimentsBudget < 1 || range.maxExperimentsBudget > 50) {
+            errors += "Experiment budget must be between 1 and 50."
+        }
+        if (range.observationSeconds < 30L) {
+            errors += "Observation window must be at least 30 seconds."
+        }
+
+        if (errors.isNotEmpty()) {
+            return RangeValidationResult(isValid = false, errors = errors)
+        }
+
+        val freqCount = ((range.maxFrequencyMhz - range.minFrequencyMhz) / FREQUENCY_STEP_MHZ) + 1
+        val voltCount = ((range.maxVoltageMv - range.minVoltageMv) / VOLTAGE_STEP_MV) + 1
+        return RangeValidationResult(
+            isValid = true,
+            errors = emptyList(),
+            frequencyCount = freqCount,
+            voltageCount = voltCount,
+            totalCombinations = freqCount * voltCount
+        )
+    }
+
+    /**
+     * Generates all eligible 5 MHz x 5 mV candidate settings inside the user-defined ranges,
+     * removing firmware-unsupported or historically unsafe configurations.
+     */
+    fun generateEligibleCandidatesInRange(
+        range: ExplorationRangeConfig,
+        capabilities: AsicCapabilities?,
+        history: List<ExperimentRecord>,
+        thresholds: SafetyThresholdConfig
+    ): List<Pair<Int, Int>> {
+        val unsafeKnown = history
+            .filter { !it.isStable || evaluateSafetyIssues(it, capabilities, thresholds).isNotEmpty() }
+            .map { it.frequencyMhz to it.voltageMv }
+            .toSet()
+
+        val freqs = (range.minFrequencyMhz..range.maxFrequencyMhz step FREQUENCY_STEP_MHZ).toList()
+        val volts = (range.minVoltageMv..range.maxVoltageMv step VOLTAGE_STEP_MV).toList()
+
+        val result = mutableListOf<Pair<Int, Int>>()
+        for (f in freqs) {
+            for (v in volts) {
+                if (isWithinFirmwareLimits(f, v, capabilities) && (f to v) !in unsafeKnown) {
+                    result += (f to v)
+                }
+            }
+        }
+        return result
+    }
+
+    /**
+     * Staged data-driven candidate selector for AI Auto Mode.
+     * Avoids brute-force random jumps by prioritizing nearby 5 MHz / 5 mV steps from the best
+     * known stable anchor, steered by the active Optimization Profile (ECO / BALANCED / BEAST).
+     */
+    fun selectNextAutoCandidate(
+        eligibleCandidates: List<Pair<Int, Int>>,
+        testedInSession: Set<Pair<Int, Int>>,
+        anchorFreqMhz: Int,
+        anchorVoltMv: Int,
+        historicalRecords: List<ExperimentRecord>,
+        profile: AnalysisProfile
+    ): Pair<Int, Int>? {
+        val untested = eligibleCandidates.filter { it !in testedInSession }
+        if (untested.isEmpty()) return null
+
+        val historicallyMeasured = historicalRecords.map { it.frequencyMhz to it.voltageMv }.toSet()
+
+        // Prefer never-tested points first, then re-verify stale points if needed
+        val freshPool = untested.filter { it !in historicallyMeasured }.ifEmpty { untested }
+
+        // Compute profile-guided priority score for each candidate around the stable anchor
+        return freshPool.sortedWith(
+            compareBy<Pair<Int, Int>> { (f, v) ->
+                val df = abs(f - anchorFreqMhz) / FREQUENCY_STEP_MHZ
+                val dv = abs(v - anchorVoltMv) / VOLTAGE_STEP_MV
+                val singleVarBonus = if (df == 0 || dv == 0) 0 else 1
+                // Prefer immediate 1-step neighbors first, then 2-step neighbors
+                (df + dv) * 10 + singleVarBonus * 3
+            }.thenBy { (f, v) ->
+                when (profile) {
+                    // ECO prioritizes lower voltage first, then modest frequency
+                    AnalysisProfile.ECO -> (v - anchorVoltMv) * 2 + (f - anchorFreqMhz)
+                    // BEAST prioritizes higher frequency first, then minimal necessary voltage
+                    AnalysisProfile.BEAST -> -(f - anchorFreqMhz) * 2 + abs(v - anchorVoltMv)
+                    // BALANCED explores slight frequency increase or undervolt symmetrically
+                    AnalysisProfile.BALANCED -> (v - anchorVoltMv) - (f - anchorFreqMhz)
+                }
+            }
+        ).firstOrNull()
+    }
+
     fun evaluateSafetyIssues(
         record: ExperimentRecord,
         capabilities: AsicCapabilities?,
@@ -79,7 +223,6 @@ object BitaxeOptimizationEngine {
             issues += "Invalid or zero hashrate/power telemetry"
         }
 
-        // Check variance / stability spike rejection
         if (record.avgHashrateThs > 0.0) {
             val spreadRatio = (record.maxHashrateThs - record.minHashrateThs) / record.avgHashrateThs
             if (spreadRatio > 0.45 && record.sampleCount >= 5) {
@@ -102,8 +245,6 @@ object BitaxeOptimizationEngine {
         val absMaxVolt = capabilities.absMaxVoltageMv
         if (absMaxVolt != null && voltageMv > absMaxVolt) return false
 
-        // Note: firmware frequencyOptions / voltageOptions may list coarse presets,
-        // while custom 5 MHz / 5 mV steps between min and absMax remain valid if not above absMax.
         if (capabilities.frequencyOptions.isNotEmpty() && absMaxFreq == null) {
             val maxOpt = capabilities.frequencyOptions.maxOrNull() ?: MAX_FREQUENCY_MHZ
             val minOpt = capabilities.frequencyOptions.minOrNull() ?: 400
@@ -117,10 +258,6 @@ object BitaxeOptimizationEngine {
         return true
     }
 
-    /**
-     * Generates the full 15 x 15 = 225 candidate grid in exact 5 MHz and 5 mV increments.
-     * Never rounds to increments of 10.
-     */
     fun buildPrecisionGrid(
         history: List<ExperimentRecord>,
         currentTelemetry: LiveTelemetry?,
@@ -134,7 +271,6 @@ object BitaxeOptimizationEngine {
         val activeFreq = currentTelemetry?.frequencyMhz
         val activeVolt = currentTelemetry?.coreVoltageTargetMv ?: currentTelemetry?.coreVoltageActualMv
 
-        // Determine anchor point for single-variable next-step exploration
         val anchorRecord = groupedByConfig.values
             .filter { it.isStable && evaluateSafetyIssues(it, capabilities, thresholds).isEmpty() }
             .maxByOrNull { it.timestampMillis }
@@ -145,7 +281,6 @@ object BitaxeOptimizationEngine {
         val anchorFreq = anchorRecord?.frequencyMhz ?: activeFreq
         val anchorVolt = anchorRecord?.voltageMv ?: activeVolt
 
-        // Collect all eligible stable records to compute normalized profile scores
         val stableRecords = groupedByConfig.values.filter {
             it.isStable && evaluateSafetyIssues(it, capabilities, thresholds).isEmpty()
         }
@@ -203,15 +338,6 @@ object BitaxeOptimizationEngine {
         return candidates
     }
 
-    /**
-     * Normalized multi-objective scoring across verified stable operating points.
-     * BALANCED default weights:
-     * - Stable Hashrate: 35%
-     * - Energy Efficiency (lower J/TH): 30%
-     * - Stability: 20%
-     * - ASIC Error Rate (lower %): 10%
-     * - Temperature (lower °C): 5%
-     */
     fun scoreStableRecords(
         records: List<ExperimentRecord>,
         profile: AnalysisProfile
@@ -260,10 +386,6 @@ object BitaxeOptimizationEngine {
         }
     }
 
-    /**
-     * Generates a data-backed optimization recommendation from actual recorded experiments.
-     * Never claims an untested configuration is stable and never invents fake percentages.
-     */
     fun recommend(
         history: List<ExperimentRecord>,
         currentTelemetry: LiveTelemetry?,
@@ -320,12 +442,10 @@ object BitaxeOptimizationEngine {
             profile = profile
         )
 
-        // Insufficient data check: require at least 2 distinct stable measured points
-        // (or at least 1 stable measured point when comparing against current measured baseline).
         if (stableCandidates.size < 2 || currentRecord == null) {
             val reason = when {
                 history.isEmpty() ->
-                    "$INSUFFICIENT_DATA_MESSAGE Connect to your Bitaxe and record at least 2 operating points (${thresholds.minObservationSeconds}s+ each) in AI Smart Analyzer."
+                    "$INSUFFICIENT_DATA_MESSAGE Connect to your Bitaxe and run AI Auto Mode or record at least 2 operating points (${thresholds.minObservationSeconds}s+ each)."
                 stableCandidates.isEmpty() ->
                     "$INSUFFICIENT_DATA_MESSAGE Recorded sessions did not pass stability and safety thresholds."
                 stableCandidates.size == 1 ->
@@ -352,7 +472,6 @@ object BitaxeOptimizationEngine {
         val bestCandidate = stableCandidates.first()
         val bestRecord = bestCandidate.measuredRecord!!
 
-        // Calculate statistical confidence strictly from real sample counts & observation duration
         val minSamples = minOf(currentRecord.sampleCount, bestRecord.sampleCount)
         val minDuration = minOf(currentRecord.durationSeconds, bestRecord.durationSeconds)
         val confidence = calculateMeasuredConfidence(minSamples, minDuration, bestRecord.disconnectCount)
@@ -451,10 +570,6 @@ object BitaxeOptimizationEngine {
         )
     }
 
-    /**
-     * Controlled single-variable exploration strategy:
-     * Prioritizes untested +5/-5 MHz or -5/+5 mV neighbors of the active/anchor stable setting.
-     */
     fun selectNextControlledExperiment(
         grid: List<GridCandidate>,
         currentFreq: Int?,
@@ -463,7 +578,6 @@ object BitaxeOptimizationEngine {
     ): GridCandidate? {
         val nextNeighbors = grid.filter { it.status == CandidateCellStatus.CANDIDATE_NEXT }
         if (nextNeighbors.isEmpty()) {
-            // Fall back to nearest untested within firmware limits
             return grid
                 .filter { it.status == CandidateCellStatus.UNTESTED }
                 .minByOrNull { it.stepDistanceFromBaseline ?: Int.MAX_VALUE }
@@ -499,7 +613,7 @@ object BitaxeOptimizationEngine {
         if (mean <= 0.0) return 0.0
         val variance = hashrates.map { (it - mean) * (it - mean) }.average()
         val stdDev = sqrt(variance)
-        val cv = stdDev / mean // coefficient of variation
+        val cv = stdDev / mean
 
         val varianceScore = (1.0 - (cv / 0.20).coerceIn(0.0, 1.0)) * 45.0
         val errScore = if (asicErrorPct != null) {

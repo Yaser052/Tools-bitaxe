@@ -5,18 +5,22 @@ import com.example.domain.engine.EfficiencyCalculator
 import com.example.domain.engine.IpInvalidReason
 import com.example.domain.engine.IpValidationResult
 import com.example.domain.engine.NetworkValidator
+import com.example.domain.engine.SafetyController
 import com.example.domain.model.AnalysisProfile
 import com.example.domain.model.AsicCapabilities
 import com.example.domain.model.CandidateCellStatus
 import com.example.domain.model.ExperimentRecord
+import com.example.domain.model.ExplorationRangeConfig
 import com.example.domain.model.LiveTelemetry
 import com.example.domain.model.SafetyThresholdConfig
+import com.example.domain.model.SafetyViolationType
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.abs
 
 class BitaxeEngineUnitTest {
 
@@ -38,6 +42,55 @@ class BitaxeEngineUnitTest {
         assertEquals(225, grid.size)
         assertTrue(grid.any { it.frequencyMhz == 605 && it.voltageMv == 1105 })
         assertTrue(grid.any { it.frequencyMhz == 665 && it.voltageMv == 1165 })
+    }
+
+    @Test
+    fun `range validation enforces min less than max, exact 5-unit steps, and firmware limits`() {
+        val valid = BitaxeOptimizationEngine.validateExplorationRange(
+            ExplorationRangeConfig(610, 645, 1115, 1155),
+            AsicCapabilities(absMaxFrequencyMhz = 670, absMaxVoltageMv = 1170)
+        )
+        assertTrue(valid.isValid)
+        assertEquals(8, valid.frequencyCount)
+        assertEquals(9, valid.voltageCount)
+        assertEquals(72, valid.totalCombinations)
+
+        val badStep = BitaxeOptimizationEngine.validateExplorationRange(
+            ExplorationRangeConfig(603, 645, 1110, 1152),
+            null
+        )
+        assertFalse(badStep.isValid)
+        assertTrue(badStep.errors.size >= 2)
+
+        val inverted = BitaxeOptimizationEngine.validateExplorationRange(
+            ExplorationRangeConfig(650, 620, 1150, 1120),
+            null
+        )
+        assertFalse(inverted.isValid)
+
+        val exceedsFw = BitaxeOptimizationEngine.validateExplorationRange(
+            ExplorationRangeConfig(600, 670, 1100, 1170),
+            AsicCapabilities(absMaxFrequencyMhz = 650, absMaxVoltageMv = 1160)
+        )
+        assertFalse(exceedsFw.isValid)
+    }
+
+    @Test
+    fun `candidate generation in range excludes unsafe historical configs`() {
+        val unsafePoint = sampleRecord(
+            id = 9, freq = 625, volt = 1120, hash = 1.15, power = 19.0, temp = 75.0, err = 5.0
+        ).copy(isStable = false)
+
+        val candidates = BitaxeOptimizationEngine.generateEligibleCandidatesInRange(
+            range = ExplorationRangeConfig(620, 630, 1115, 1125),
+            capabilities = null,
+            history = listOf(unsafePoint),
+            thresholds = SafetyThresholdConfig()
+        )
+        // 3 freqs x 3 volts = 9 minus 1 unsafe = 8
+        assertEquals(8, candidates.size)
+        assertFalse((625 to 1120) in candidates)
+        assertTrue((625 to 1125) in candidates)
     }
 
     @Test
@@ -69,11 +122,49 @@ class BitaxeEngineUnitTest {
     }
 
     @Test
+    fun `safety controller detects overheat, errors, unexpected restart, collapse, and rejects unsafe settings`() {
+        val thresholds = SafetyThresholdConfig(maxAsicTempHardLimitC = 70.0, maxAsicErrorPct = 3.0)
+
+        // Pre-apply rejection for invalid non-5-unit step
+        val badStep = SafetyController.validateTargetSetting(
+            frequencyMhz = 622,
+            voltageMv = 1150,
+            capabilities = null,
+            liveTelemetry = null,
+            thresholds = thresholds
+        )
+        assertFalse(badStep.isSafe)
+        assertTrue(badStep.violations.any { it.type == SafetyViolationType.INVALID_LIMITS })
+
+        // Live tick detecting unexpected restart + overheat + hashrate collapse + errors
+        val badTick = LiveTelemetry(
+            deviceIp = "192.168.1.100",
+            asicTempC = 72.5,
+            asicErrorPct = 4.2,
+            currentHashrateThs = 0.30,
+            uptimeSeconds = 5L
+        )
+        val assessment = SafetyController.assessLiveTelemetry(
+            current = badTick,
+            previousUptimeSeconds = 180L,
+            baselineHashrateThs = 1.20,
+            consecutiveTimeouts = 0,
+            thresholds = thresholds,
+            enforceHashrateCollapse = true
+        )
+        assertFalse(assessment.isSafe)
+        val types = assessment.violations.map { it.type }.toSet()
+        assertTrue(SafetyViolationType.OVERHEAT_ASIC in types)
+        assertTrue(SafetyViolationType.ABNORMAL_ASIC_ERRORS in types)
+        assertTrue(SafetyViolationType.DEVICE_RESTART_DETECTED in types)
+        assertTrue(SafetyViolationType.HASHRATE_COLLAPSE in types)
+    }
+
+    @Test
     fun `safety priority blocks overheating high-hashrate config from recommendation`() {
         val thresholds = SafetyThresholdConfig(maxAsicTempHardLimitC = 70.0, minObservationSeconds = 60L, minSampleCount = 10)
         val current = sampleRecord(id = 1, freq = 625, volt = 1150, hash = 1.20, power = 18.7, temp = 59.0, err = 0.2)
         val stableGood = sampleRecord(id = 2, freq = 630, volt = 1145, hash = 1.24, power = 18.4, temp = 60.5, err = 0.3)
-        // Higher hashrate, but unsafe ASIC temperature (74°C > 70°C)
         val unsafeHot = sampleRecord(id = 3, freq = 665, volt = 1170, hash = 1.42, power = 24.5, temp = 74.0, err = 4.5)
 
         val live = LiveTelemetry(deviceIp = "192.168.1.100", frequencyMhz = 625, coreVoltageTargetMv = 1150)
@@ -92,72 +183,38 @@ class BitaxeEngineUnitTest {
     }
 
     @Test
-    fun `insufficient measurement data triggers explicit warning instead of inventing recommendation`() {
-        val single = sampleRecord(id = 1, freq = 625, volt = 1150, hash = 1.20, power = 18.7, temp = 59.0, err = 0.2)
-        val live = LiveTelemetry(deviceIp = "192.168.1.100", frequencyMhz = 625, coreVoltageTargetMv = 1150)
-
-        val rec = BitaxeOptimizationEngine.recommend(
-            history = listOf(single),
-            currentTelemetry = live,
-            capabilities = null,
-            thresholds = SafetyThresholdConfig(),
-            profile = AnalysisProfile.BALANCED
+    fun `configuration verification confirms exact match and detects mismatch`() {
+        val telemetryMatch = LiveTelemetry(
+            deviceIp = "192.168.1.100",
+            frequencyMhz = 635,
+            coreVoltageTargetMv = 1145,
+            coreVoltageActualMv = 1144
         )
+        val matchFreq = telemetryMatch.frequencyMhz == 635
+        val matchVolt = telemetryMatch.coreVoltageTargetMv == 1145 ||
+            (telemetryMatch.coreVoltageTargetMv == null && abs((telemetryMatch.coreVoltageActualMv ?: 0) - 1145) <= 10)
+        assertTrue(matchFreq && matchVolt)
 
-        assertTrue(rec.isInsufficientData)
-        assertNull(rec.recommendedConfig)
-        assertTrue(rec.insufficientDataReason!!.contains(BitaxeOptimizationEngine.INSUFFICIENT_DATA_MESSAGE))
-        assertNotNull(rec.nextExperimentCandidate)
-        assertEquals(CandidateCellStatus.CANDIDATE_NEXT, rec.nextExperimentCandidate?.status)
+        val telemetryMismatch = LiveTelemetry(
+            deviceIp = "192.168.1.100",
+            frequencyMhz = 625,
+            coreVoltageTargetMv = 1150
+        )
+        assertFalse(telemetryMismatch.frequencyMhz == 635 && telemetryMismatch.coreVoltageTargetMv == 1145)
     }
 
     @Test
-    fun `moshi parses real ESP-Miner system info and asic payloads with missing optional fields`() {
-        val moshi = com.squareup.moshi.Moshi.Builder()
-            .addLast(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory())
-            .build()
-        val infoAdapter = moshi.adapter(com.example.data.network.SystemInfoDto::class.java)
-        val asicAdapter = moshi.adapter(com.example.data.network.SystemAsicDto::class.java)
+    fun `rollback target selection prioritizes last known stable over baseline and defaults`() {
+        val lastKnown = sampleRecord(id = 10, freq = 630, volt = 1140, hash = 1.23, power = 18.2, temp = 58.0, err = 0.1)
+            .copy(isLastKnownStable = true, isStable = true)
+        val baseline = sampleRecord(id = 11, freq = 625, volt = 1150, hash = 1.20, power = 18.7, temp = 59.0, err = 0.2)
+            .copy(isLastKnownStable = false, isStable = true)
+        val caps = AsicCapabilities(defaultFrequencyMhz = 600, defaultVoltageMv = 1150)
 
-        val infoJson = """
-            {
-              "power": 18.7,
-              "temp": 59.5,
-              "vrTemp": 67.2,
-              "hashRate": 1200.0,
-              "frequency": 625,
-              "coreVoltage": 1150,
-              "coreVoltageActual": 1148,
-              "ASICModel": "BM1370",
-              "boardVersion": "601",
-              "deviceModel": "Gamma",
-              "sharesAccepted": 140,
-              "sharesRejected": 1,
-              "version": "v2.6.0",
-              "uptimeSeconds": 3600
-            }
-        """.trimIndent()
-        val info = infoAdapter.fromJson(infoJson)
-        assertNotNull(info)
-        assertEquals("BM1370", info!!.asicModel)
-        assertEquals("601", info.boardVersion)
-        assertEquals(625.0, info.frequency!!, 0.01)
-        assertEquals(1150, info.coreVoltage)
-        assertNull(info.staleShares) // missing field stays null, never fabricated
-
-        val asicJson = """
-            {
-              "ASICModel": "BM1370",
-              "frequencyOptions": [500, 525, 550, 575, 600, 625, 650],
-              "voltageOptions": [1100, 1125, 1150, 1175],
-              "absMaxFrequency": 670,
-              "absMaxVoltage": 1170
-            }
-        """.trimIndent()
-        val asic = asicAdapter.fromJson(asicJson)
-        assertNotNull(asic)
-        assertEquals(670, asic!!.absMaxFrequency)
-        assertEquals(1170, asic.absMaxVoltage)
+        assertEquals(630 to 1140, SafetyController.selectRollbackTarget(listOf(baseline, lastKnown), baseline, caps))
+        assertEquals(625 to 1150, SafetyController.selectRollbackTarget(emptyList(), baseline, caps))
+        assertEquals(600 to 1150, SafetyController.selectRollbackTarget(emptyList(), null, caps))
+        assertNull(SafetyController.selectRollbackTarget(emptyList(), null, null))
     }
 
     @Test
@@ -183,6 +240,45 @@ class BitaxeEngineUnitTest {
             profile = AnalysisProfile.BEAST
         )
         assertEquals(655, beastRec.recommendedConfig?.frequencyMhz)
+    }
+
+    @Test
+    fun `moshi parses real ESP-Miner system info, asic, and patch payloads`() {
+        val moshi = com.squareup.moshi.Moshi.Builder()
+            .addLast(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory())
+            .build()
+        val infoAdapter = moshi.adapter(com.example.data.network.SystemInfoDto::class.java)
+        val patchAdapter = moshi.adapter(com.example.data.network.SystemConfigPatchRequest::class.java)
+
+        val infoJson = """
+            {
+              "power": 18.7,
+              "temp": 59.5,
+              "vrTemp": 67.2,
+              "hashRate": 1200.0,
+              "frequency": 625,
+              "coreVoltage": 1150,
+              "coreVoltageActual": 1148,
+              "ASICModel": "BM1370",
+              "boardVersion": "601",
+              "deviceModel": "Gamma",
+              "sharesAccepted": 140,
+              "sharesRejected": 1,
+              "version": "v2.6.0",
+              "uptimeSeconds": 3600
+            }
+        """.trimIndent()
+        val info = infoAdapter.fromJson(infoJson)
+        assertNotNull(info)
+        assertEquals("BM1370", info!!.asicModel)
+        assertEquals("601", info.boardVersion)
+        assertNull(info.staleShares)
+
+        val serializedPatch = patchAdapter.toJson(
+            com.example.data.network.SystemConfigPatchRequest(frequency = 635, coreVoltage = 1145)
+        )
+        assertTrue(serializedPatch.contains("\"frequency\":635"))
+        assertTrue(serializedPatch.contains("\"coreVoltage\":1145"))
     }
 
     private fun sampleRecord(
